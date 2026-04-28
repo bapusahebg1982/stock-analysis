@@ -4,14 +4,12 @@ app = FastAPI()
 
 @app.get("/")
 def root():
-    return {"message": "AI Stock Backend Running"}
+    return {"status": "running"}
 
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     return {
         "ticker": ticker,
         "price": 100,
-        "scores": {
-            "total": 75
-        }
+        "scores": {"total": 75}
     }
