@@ -19,25 +19,26 @@ def root():
     return {"status": "Backend running"}
 
 
-# ---------- HELPERS ----------
+# ---------------- HELPERS ----------------
 
 def safe_float(x):
     try:
         if x is None or (isinstance(x, float) and math.isnan(x)):
             return None
-        return float(x)
+        return round(float(x), 1)
     except:
         return None
 
 
-def normalize_ticker(ticker):
-    ticker = ticker.upper()
-    try:
+def normalize_ticker(ticker: str):
+    ticker = ticker.upper().strip()
+
+    # Try US first, fallback India
+    if "." not in ticker:
         test = yf.Ticker(ticker).history(period="5d")
-        if test.empty and "." not in ticker:
-            ticker += ".NS"
-    except:
-        pass
+        if test.empty:
+            ticker = ticker + ".NS"
+
     return ticker
 
 
@@ -49,36 +50,43 @@ def compute_rsi(df, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# ---------- CORE ----------
-
-def analyze_stock(raw):
+def is_beaten_down(price, high_1y):
     try:
-        ticker = normalize_ticker(raw)
+        if not price or not high_1y:
+            return False
+        return (price / high_1y) < 0.7
+    except:
+        return False
+
+
+# ---------------- CORE ANALYSIS ----------------
+
+def analyze_stock(raw_ticker):
+    try:
+        ticker = normalize_ticker(raw_ticker)
         stock = yf.Ticker(ticker)
 
-        df_1y = stock.history(period="1y")
-        df_5y = stock.history(period="5y")
+        df = stock.history(period="1y")
+        df5 = stock.history(period="5y")
 
-        if df_1y.empty or len(df_1y) < 30:
+        if df.empty or len(df) < 50:
             return None
 
-        price = safe_float(df_1y["Close"].iloc[-1])
+        price = safe_float(df["Close"].iloc[-1])
 
-        # Technicals
-        df_1y["RSI"] = compute_rsi(df_1y)
-        rsi = safe_float(df_1y["RSI"].iloc[-1])
+        # RSI
+        df["RSI"] = compute_rsi(df)
+        rsi = safe_float(df["RSI"].iloc[-1])
 
-        ma50 = safe_float(df_1y["Close"].rolling(50).mean().iloc[-1])
-        ma200 = safe_float(df_1y["Close"].rolling(200).mean().iloc[-1]) if len(df_1y) >= 200 else None
+        ma50 = safe_float(df["Close"].rolling(50).mean().iloc[-1])
+        ma200 = safe_float(df["Close"].rolling(200).mean().iloc[-1]) if len(df) >= 200 else None
 
         # Volume
-        avg_vol = safe_float(df_1y["Volume"].rolling(20).mean().iloc[-1])
-        vol = safe_float(df_1y["Volume"].iloc[-1])
-        volume_spike = False
-        if avg_vol and vol:
-            volume_spike = vol > 1.5 * avg_vol
+        avg_vol = safe_float(df["Volume"].rolling(20).mean().iloc[-1])
+        vol = safe_float(df["Volume"].iloc[-1])
+        volume_spike = bool(avg_vol and vol and vol > 1.5 * avg_vol)
 
-        # Fundamentals (SAFE)
+        # Fundamentals (safe)
         try:
             info = stock.get_info()
         except:
@@ -89,13 +97,14 @@ def analyze_stock(raw):
         revenue_growth = safe_float(info.get("revenueGrowth"))
 
         # High / Low
-        high_1y = safe_float(df_1y["High"].max())
-        low_1y = safe_float(df_1y["Low"].min())
+        high_1y = safe_float(df["High"].max())
+        low_1y = safe_float(df["Low"].min())
 
-        high_5y = safe_float(df_5y["High"].max()) if not df_5y.empty else None
-        low_5y = safe_float(df_5y["Low"].min()) if not df_5y.empty else None
+        high_5y = safe_float(df5["High"].max()) if not df5.empty else None
+        low_5y = safe_float(df5["Low"].min()) if not df5.empty else None
 
-        # ---------- SCORING ----------
+        # ---------------- SCORING ----------------
+
         score = 50
         reasons = []
 
@@ -105,19 +114,19 @@ def analyze_stock(raw):
                 reasons.append("Oversold (possible rebound)")
             elif rsi > 70:
                 score -= 15
-                reasons.append("Overbought (possible pullback)")
+                reasons.append("Overbought (risk of pullback)")
 
         if price and ma50 and price > ma50:
             score += 10
-            reasons.append("Above 50-day average")
+            reasons.append("Above 50-day moving average")
 
         if price and ma200 and price > ma200:
             score += 10
-            reasons.append("Above 200-day average")
+            reasons.append("Strong long-term trend")
 
         if volume_spike:
             score += 5
-            reasons.append("High trading volume")
+            reasons.append("Unusual volume spike")
 
         if profit_margin and profit_margin > 0.15:
             score += 5
@@ -125,72 +134,106 @@ def analyze_stock(raw):
 
         if revenue_growth and revenue_growth > 0:
             score += 5
-            reasons.append("Growing revenue")
+            reasons.append("Revenue growth positive")
 
         score = max(0, min(100, int(score)))
 
-        # Layman explanation
+        # ---------------- LAYMAN INSIGHT ----------------
+
         if score >= 75:
-            layman = "Strong stock with good momentum and fundamentals."
+            summary = "Strong stock with momentum and solid fundamentals."
         elif score >= 60:
-            layman = "Decent stock but not a strong buy yet."
+            summary = "Mixed signals. Needs confirmation before entry."
         else:
-            layman = "Weak signals. Better opportunities may exist."
+            summary = "Weak momentum. Higher risk or better alternatives exist."
 
         return {
             "ticker": ticker,
             "price": price,
             "score": score,
+
             "fundamentals": {
                 "pe": pe,
                 "profit_margin": profit_margin,
                 "revenue_growth": revenue_growth
             },
+
             "technicals": {
                 "rsi": rsi,
                 "ma50": ma50,
                 "ma200": ma200,
                 "volume_spike": volume_spike
             },
+
             "highs_lows": {
                 "1y_high": high_1y,
                 "1y_low": low_1y,
                 "5y_high": high_5y,
                 "5y_low": low_5y
             },
-            "reasons": reasons,
-            "layman": layman
+
+            "insights": {
+                "summary": summary,
+                "signals": reasons
+            }
         }
 
-    except Exception as e:
+    except:
         return None
 
 
-# ---------- MAIN ----------
+# ---------------- UNIVERSE ----------------
 
 UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA",
-    "RELIANCE.NS", "INFY.NS", "TCS.NS"
+    "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"
 ]
+
+
+# ---------------- MAIN ANALYZE ----------------
 
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     main = analyze_stock(ticker)
 
     if not main:
-        return {"error": "Ticker not found or insufficient data"}
+        return {"error": "Invalid or insufficient data"}
 
     better = []
 
     for t in UNIVERSE:
         if t != main["ticker"]:
             res = analyze_stock(t)
-            if res and res["score"] > main["score"]:
-                better.append(res)
+            if res:
+                beat = is_beaten_down(res["price"], res["highs_lows"]["1y_high"])
+
+                if res["score"] >= 65 or beat:
+                    res["is_beaten_down"] = beat
+                    better.append(res)
 
     better = sorted(better, key=lambda x: x["score"], reverse=True)[:5]
 
     return {
         "stock": main,
         "better_options": better
+    }
+
+
+# ---------------- OPPORTUNITIES (FILTERED) ----------------
+
+@app.get("/opportunities")
+def opportunities(max_price: float = 1000):
+    results = []
+
+    for t in UNIVERSE:
+        res = analyze_stock(t)
+        if res and res["price"] and res["price"] <= max_price:
+            beat = is_beaten_down(res["price"], res["highs_lows"]["1y_high"])
+
+            if res["score"] >= 65 or beat:
+                res["is_beaten_down"] = beat
+                results.append(res)
+
+    return {
+        "opportunities": sorted(results, key=lambda x: x["score"], reverse=True)
     }
