@@ -5,7 +5,6 @@ import pandas as pd
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,6 +18,17 @@ def root():
     return {"status": "Backend running"}
 
 
+# 🔍 Auto ticker fix (India support)
+def normalize_ticker(ticker: str):
+    ticker = ticker.upper()
+    if "." not in ticker:
+        # Try US first, fallback India
+        test = yf.Ticker(ticker).history(period="5d")
+        if test.empty:
+            ticker = ticker + ".NS"
+    return ticker
+
+
 # RSI
 def compute_rsi(df, period=14):
     delta = df["Close"].diff()
@@ -28,8 +38,19 @@ def compute_rsi(df, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# Analyze single stock
-def analyze_stock(ticker):
+# 🔎 Get sector
+def get_sector(stock):
+    try:
+        info = stock.info
+        return info.get("sector", "Unknown")
+    except:
+        return "Unknown"
+
+
+# 🧠 Analysis
+def analyze_stock(raw_ticker):
+    ticker = normalize_ticker(raw_ticker)
+
     stock = yf.Ticker(ticker)
     df = stock.history(period="1y")
 
@@ -42,81 +63,113 @@ def analyze_stock(ticker):
     rsi = float(df["RSI"].iloc[-1])
 
     ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
+    ma200 = float(df["Close"].rolling(200).mean().iloc[-1]) if len(df) >= 200 else None
 
+    # Score
     score = 50
+    reasons = []
 
+    # RSI
     if rsi < 30:
         score += 20
+        reasons.append("Oversold (RSI < 30)")
     elif rsi > 70:
         score -= 20
+        reasons.append("Overbought (RSI > 70)")
 
+    # Trend
     if price > ma50:
         score += 10
+        reasons.append("Above 50-day MA (bullish)")
+    if ma200 and price > ma200:
+        score += 10
+        reasons.append("Above 200-day MA (long-term strength)")
 
     score = max(0, min(100, int(score)))
 
-    # AI Recommendation label
+    # Recommendation
     if score >= 75:
-        rec = "BUY"
+        short_term = "Bullish momentum"
+        long_term = "Strong trend continuation"
     elif score >= 60:
-        rec = "HOLD"
+        short_term = "Neutral / wait for breakout"
+        long_term = "Stable but not strong"
     else:
-        rec = "AVOID"
+        short_term = "Weak momentum"
+        long_term = "Potential downside risk"
+
+    sector = get_sector(stock)
 
     return {
-        "ticker": ticker.upper(),
+        "ticker": ticker,
         "price": round(price, 2),
         "score": score,
-        "recommendation": rec
+        "sector": sector,
+        "technicals": {
+            "rsi": round(rsi, 2),
+            "ma50": round(ma50, 2),
+            "ma200": round(ma200, 2) if ma200 else None
+        },
+        "insights": {
+            "short_term": short_term,
+            "long_term": long_term,
+            "reasons": reasons
+        }
     }
 
 
-# MAIN ANALYZE
+# 🔁 Peer finder (dynamic-ish)
+SECTOR_PEERS = {
+    "Technology": ["AAPL", "MSFT", "GOOGL", "NVDA"],
+    "Financial Services": ["JPM", "BAC", "HDFCBANK.NS"],
+    "Energy": ["XOM", "CVX", "RELIANCE.NS"],
+    "Consumer Cyclical": ["AMZN", "TSLA"],
+}
+
+
+def get_peers(sector):
+    return SECTOR_PEERS.get(sector, [])
+
+
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     try:
-        result = analyze_stock(ticker)
-        if not result:
-            return {"error": "Not enough data"}
-        return result
+        main = analyze_stock(ticker)
+
+        if not main:
+            return {"error": "Ticker not found or insufficient data"}
+
+        peers = get_peers(main["sector"])
+
+        peer_results = []
+        for p in peers:
+            if p != main["ticker"]:
+                res = analyze_stock(p)
+                if res:
+                    peer_results.append(res)
+
+        peer_results = sorted(peer_results, key=lambda x: x["score"], reverse=True)
+
+        return {
+            "stock": main,
+            "peers": peer_results[:5]
+        }
+
     except Exception as e:
         return {"error": str(e)}
 
 
-# 💼 PORTFOLIO AI
-@app.post("/portfolio")
-def portfolio(tickers: list[str]):
-    results = []
-
-    for t in tickers:
-        res = analyze_stock(t)
-        if res:
-            results.append(res)
-
-    return {
-        "portfolio": results
-    }
-
-
-# 🧠 AI RECOMMENDATION ENGINE
-
-US_STOCKS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA"]
-INDIA_STOCKS = ["INFY.NS", "TCS.NS", "HDFCBANK.NS", "RELIANCE.NS"]
-
+# 🧠 Recommendations
 @app.get("/recommendations")
 def recommendations():
-    candidates = US_STOCKS + INDIA_STOCKS
+    universe = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA", "INFY.NS", "RELIANCE.NS"]
 
     results = []
-
-    for t in candidates:
+    for t in universe:
         res = analyze_stock(t)
         if res:
             results.append(res)
 
-    # sort by best score
     results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-    return {
-        "top_picks": results[:5]
-    }
+    return {"top_picks": results[:5]}
