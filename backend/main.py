@@ -5,7 +5,7 @@ import pandas as pd
 
 app = FastAPI()
 
-# ✅ CORS (required for frontend)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,12 +14,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ ROOT ROUTE (THIS FIXES YOUR ERROR)
 @app.get("/")
 def root():
     return {"status": "Backend running"}
 
-# RSI calculation
+# RSI
 def compute_rsi(df, period=14):
     delta = df["Close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -27,58 +26,82 @@ def compute_rsi(df, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# Main API
+
+# Core scoring logic
+def analyze_stock(ticker):
+    stock = yf.Ticker(ticker)
+    df = stock.history(period="1y")
+
+    if df.empty or len(df) < 50:
+        return None
+
+    price = float(df["Close"].iloc[-1])
+
+    df["RSI"] = compute_rsi(df)
+    rsi = float(df["RSI"].iloc[-1])
+
+    ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
+
+    ma200 = None
+    if len(df) >= 200:
+        ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
+
+    score = 50
+
+    if rsi < 30:
+        score += 20
+    elif rsi > 70:
+        score -= 20
+
+    if price > ma50:
+        score += 10
+    if ma200 and price > ma200:
+        score += 10
+
+    score = max(0, min(100, int(score)))
+
+    return {
+        "ticker": ticker.upper(),
+        "price": round(price, 2),
+        "score": score
+    }
+
+
+# Sector mapping (starter)
+SECTOR_MAP = {
+    "AAPL": ["MSFT", "GOOGL", "NVDA"],
+    "MSFT": ["AAPL", "GOOGL", "NVDA"],
+    "GOOGL": ["AAPL", "MSFT", "META"],
+    "TSLA": ["NIO", "RIVN", "F"],
+    "INFY.NS": ["TCS.NS", "WIPRO.NS", "HCLTECH.NS"]
+}
+
+
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="1y")
+        main = analyze_stock(ticker)
 
-        if df.empty or len(df) < 50:
+        if not main:
             return {"error": "Not enough data"}
 
-        price = float(df["Close"].iloc[-1])
+        peers = SECTOR_MAP.get(ticker.upper(), [])
 
-        # RSI
-        df["RSI"] = compute_rsi(df)
-        rsi = float(df["RSI"].iloc[-1])
+        peer_results = []
+        for p in peers:
+            res = analyze_stock(p)
+            if res:
+                peer_results.append(res)
 
-        # Moving averages (safe)
-        ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
-
-        ma200 = None
-        if len(df) >= 200:
-            ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
-
-        score = 50
-
-        # RSI scoring
-        if rsi < 30:
-            score += 20
-        elif rsi > 70:
-            score -= 20
-
-        # Trend scoring
-        if price > ma50:
-            score += 10
-        if ma200 and price > ma200:
-            score += 10
-
-        score = max(0, min(100, int(score)))
+        # Sort best first
+        peer_results = sorted(peer_results, key=lambda x: x["score"], reverse=True)
 
         return {
-            "ticker": ticker.upper(),
-            "price": round(price, 2),
-            "scores": {"total": score},
-            "technicals": {
-                "rsi": round(rsi, 2),
-                "ma50": round(ma50, 2),
-                "ma200": round(ma200, 2) if ma200 else None
-            }
+            "ticker": main["ticker"],
+            "price": main["price"],
+            "scores": {"total": main["score"]},
+            "peers": peer_results
         }
-
-    except Exception as e:
-        return {"error": str(e)}
 
     except Exception as e:
         return {"error": str(e)}
