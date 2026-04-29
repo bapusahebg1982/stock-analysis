@@ -13,19 +13,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- CLEAN MARKET SEGREGATION ----------------
 
-US_POOL = [
-    "AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX","AMD","INTC"
-]
-
-INDIA_POOL = [
-    "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
-    "SBIN.NS","LT.NS","WIPRO.NS","BAJFINANCE.NS"
-]
-
-
-# ---------------- HELPERS ----------------
+# ---------------- UTIL ----------------
 
 def safe(x):
     try:
@@ -44,16 +33,54 @@ def normalize(t):
     return t
 
 
-def detect_market(t):
-    return "INDIA" if ".NS" in t else "US"
-
-
 def rsi(df):
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
+
+
+# ---------------- AI REASONING ENGINE ----------------
+
+def ai_reasoning(price, rsi_val, ma50, beaten, score):
+
+    if score >= 75:
+        decision = "BUY"
+    elif score >= 60:
+        decision = "HOLD"
+    else:
+        decision = "AVOID"
+
+    reasons = []
+
+    if rsi_val is not None:
+        if rsi_val < 30:
+            reasons.append("Oversold condition → rebound potential")
+        elif rsi_val > 70:
+            reasons.append("Overbought → short-term risk")
+
+    if price and ma50:
+        if price > ma50:
+            reasons.append("Above trend → bullish momentum")
+        else:
+            reasons.append("Below trend → weak momentum")
+
+    if beaten:
+        reasons.append("Trading near yearly lows → value zone")
+
+    timeframe = (
+        "3–9 months upside" if decision == "BUY"
+        else "1–3 months consolidation" if decision == "HOLD"
+        else "No strong setup"
+    )
+
+    return {
+        "decision": decision,
+        "reasoning": reasons,
+        "timeframe": timeframe,
+        "risk": "High" if decision == "AVOID" else "Medium"
+    }
 
 
 # ---------------- CORE ANALYSIS ----------------
@@ -69,9 +96,11 @@ def analyze_stock(raw):
 
         price = safe(df["Close"].iloc[-1])
         high = safe(df["High"].max())
+        low = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
+        ma200 = safe(df["Close"].rolling(200).mean().iloc[-1])
 
         info = {}
         try:
@@ -79,87 +108,69 @@ def analyze_stock(raw):
         except:
             pass
 
-        market = detect_market(t)
         sector = info.get("sector", "Unknown")
+        market = "INDIA" if ".NS" in t else "US"
 
+        # ---------------- SCORE ----------------
         score = 50
-        signals = []
 
         if r and r < 30:
             score += 15
-            signals.append("Oversold")
         elif r and r > 70:
             score -= 15
-            signals.append("Overbought")
 
         if price and ma50 and price > ma50:
             score += 10
-            signals.append("Uptrend")
 
         beaten = (price / high) < 0.75 if high else False
+
+        score = max(0, min(100, int(score)))
+
+        # ---------------- AI VIEW ----------------
+        ai_view = ai_reasoning(price, r, ma50, beaten, score)
 
         return {
             "ticker": t,
             "price": price,
-            "score": score,
             "market": market,
             "sector": sector,
-            "beaten_down": beaten,
-            "signals": signals
+            "score": score,
+
+            "fundamentals": {
+                "pe": safe(info.get("trailingPE")),
+                "profit_margin": safe(info.get("profitMargins")),
+                "revenue_growth": safe(info.get("revenueGrowth"))
+            },
+
+            "technicals": {
+                "rsi": r,
+                "ma50": ma50,
+                "ma200": ma200,
+                "trend": "Bullish" if price > ma50 else "Bearish"
+            },
+
+            "high_low": {
+                "1y_high": high,
+                "1y_low": low
+            },
+
+            "signals": ai_view["reasoning"],
+            "ai_view": ai_view,
+            "beaten_down": beaten
         }
 
     except:
         return None
 
 
-# ---------------- MARKET FILTER ENGINE ----------------
+# ---------------- SIMPLE MARKET POOLS ----------------
+
+US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX","AMD","INTC"]
+INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","LT.NS"]
+
 
 def get_pool(market):
     return US_POOL if market == "US" else INDIA_POOL
-
-
-def get_sector_opps(main, pool):
-    results = []
-
-    for t in pool:
-        if t == main["ticker"]:
-            continue
-
-        r = analyze_stock(t)
-        if not r:
-            continue
-
-        # STRICT MARKET ENFORCEMENT
-        if r["market"] != main["market"]:
-            continue
-
-        # SOFT SECTOR MATCH (NOT STRICT STRING DEPENDENCY)
-        if r["score"] >= main["score"] - 10:
-            results.append(r)
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)[:5]
-
-
-def get_beaten_down(main):
-    pool = get_pool(main["market"])
-
-    results = []
-
-    for t in pool:
-        if t == main["ticker"]:
-            continue
-
-        r = analyze_stock(t)
-        if not r:
-            continue
-
-        if r["market"] != main["market"]:
-            continue
-
-        if r["beaten_down"] and r["score"] >= 60:
-            results.append(r)
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)[:5]
 
 
 # ---------------- API ----------------
@@ -173,8 +184,30 @@ def analyze_api(ticker: str):
 
     pool = get_pool(main["market"])
 
+    sector_opps = []
+    beaten_opps = []
+
+    for p in pool:
+        if p == main["ticker"]:
+            continue
+
+        r = analyze_stock(p)
+        if not r:
+            continue
+
+        if r["market"] != main["market"]:
+            continue
+
+        # sector logic
+        if r["sector"] == main["sector"] and r["score"] >= main["score"] - 10:
+            sector_opps.append(r)
+
+        # beaten logic
+        if r["beaten_down"] and r["score"] >= 60:
+            beaten_opps.append(r)
+
     return {
         "stock": main,
-        "sector_opportunities": get_sector_opps(main, pool),
-        "beaten_down_opportunities": get_beaten_down(main)
+        "sector_opportunities": sector_opps[:5],
+        "beaten_down_opportunities": beaten_opps[:5]
     }
