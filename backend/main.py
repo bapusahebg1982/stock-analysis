@@ -12,14 +12,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"status": "running"}
+import yfinance as yf
 
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period="1d")
+
+    price = float(hist["Close"].iloc[-1]) if not hist.empty else 0
+
     return {
         "ticker": ticker,
-        "price": 100,
+        "price": round(price, 2),
         "scores": {"total": 75}
     }
