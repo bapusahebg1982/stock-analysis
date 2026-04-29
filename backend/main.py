@@ -41,6 +41,62 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
+# ---------------- GPT-STYLE ANALYST ENGINE ----------------
+
+def gpt_analyst(stock, price, rsi_val, ma50, beaten, fundamentals, sector):
+
+    trend = "bullish" if ma50 and price > ma50 else "bearish"
+
+    # -------- THESIS --------
+    bull = []
+    bear = []
+
+    if rsi_val and rsi_val < 30:
+        bull.append("Stock is oversold which historically leads to mean reversion rallies")
+    if rsi_val and rsi_val > 70:
+        bear.append("Overbought condition increases probability of short-term correction")
+
+    if trend == "bullish":
+        bull.append("Price is trading above trend support (MA50)")
+    else:
+        bear.append("Price is below key moving average indicating weakness")
+
+    if beaten:
+        bull.append("Stock is trading near yearly lows which may indicate value accumulation zone")
+
+    if fundamentals.get("revenue_growth") and fundamentals["revenue_growth"] > 0.1:
+        bull.append("Strong revenue growth supports long-term compounding story")
+
+    if fundamentals.get("pe") and fundamentals["pe"] and fundamentals["pe"] > 50:
+        bear.append("High valuation increases downside sensitivity")
+
+    # -------- FINAL VIEW --------
+
+    if len(bull) > len(bear) + 1:
+        view = "BULLISH"
+    elif len(bear) > len(bull):
+        view = "BEARISH"
+    else:
+        view = "NEUTRAL"
+
+    # -------- CASES --------
+
+    return {
+        "view": view,
+
+        "bull_case": bull if bull else ["Limited bullish signals"],
+        "bear_case": bear if bear else ["Limited bearish signals"],
+
+        "short_term": "1–3 months volatility expected around earnings & momentum",
+        "long_term": "6–12 months depends on earnings growth + sector trend",
+
+        "risk_summary": (
+            "High volatility stock" if rsi_val and (rsi_val > 70 or rsi_val < 30)
+            else "Moderate risk profile"
+        )
+    }
+
+
 # ---------------- TARGET ENGINE ----------------
 
 def target_engine(price, rsi_val):
@@ -50,149 +106,26 @@ def target_engine(price, rsi_val):
 
     if rsi_val and rsi_val < 30:
         return {
-            "buy_target": round(price * 1.05, 2),
-            "mid_target": round(price * 1.15, 2),
-            "sell_target": round(price * 1.30, 2)
+            "buy": round(price * 1.05, 2),
+            "mid": round(price * 1.15, 2),
+            "sell": round(price * 1.30, 2)
         }
 
     if rsi_val and rsi_val > 70:
         return {
-            "buy_target": round(price * 0.95, 2),
-            "mid_target": round(price * 0.90, 2),
-            "sell_target": round(price * 0.85, 2)
+            "buy": round(price * 0.95, 2),
+            "mid": round(price * 0.90, 2),
+            "sell": round(price * 0.85, 2)
         }
 
     return {
-        "buy_target": round(price * 1.05, 2),
-        "mid_target": round(price * 1.10, 2),
-        "sell_target": round(price * 1.18, 2)
+        "buy": round(price * 1.05, 2),
+        "mid": round(price * 1.10, 2),
+        "sell": round(price * 1.18, 2)
     }
 
 
-# ---------------- AI ENGINE ----------------
-
-def ai_engine(price, rsi_val, ma50, beaten, score):
-
-    if score >= 75:
-        decision = "BUY"
-    elif score >= 60:
-        decision = "HOLD"
-    else:
-        decision = "AVOID"
-
-    reasons = []
-
-    if rsi_val:
-        if rsi_val < 30:
-            reasons.append("Oversold → rebound probability high")
-        elif rsi_val > 70:
-            reasons.append("Overbought → correction risk")
-
-    if price and ma50:
-        if price > ma50:
-            reasons.append("Above MA50 → bullish trend")
-        else:
-            reasons.append("Below MA50 → weak trend")
-
-    if beaten:
-        reasons.append("Near 1Y low → value zone")
-
-    return {
-        "decision": decision,
-        "reasoning": reasons,
-        "timeframe": "3–9 months",
-        "risk": "High" if decision == "AVOID" else "Medium"
-    }
-
-
-# ---------------- NEWS ----------------
-
-def news_engine(stock):
-    try:
-        s = yf.Ticker(stock)
-        news = s.news or []
-
-        out = []
-
-        for n in news[:5]:
-            title = n.get("title", "")
-
-            sentiment = 0
-            if any(w in title.lower() for w in ["rise","surge","beat","strong"]):
-                sentiment += 1
-            if any(w in title.lower() for w in ["fall","drop","weak","loss"]):
-                sentiment -= 1
-
-            out.append({
-                "title": title,
-                "sentiment": sentiment
-            })
-
-        return out
-    except:
-        return []
-
-
-# ---------------- ALERTS ----------------
-
-def alerts_engine(stock):
-
-    alerts = []
-    t = stock["technicals"]
-
-    if t["rsi"] and t["rsi"] < 30:
-        alerts.append("RSI oversold → bounce setup")
-
-    if t["trend"] == "Bullish":
-        alerts.append("Bullish momentum confirmed")
-
-    if stock["beaten_down"]:
-        alerts.append("Stock near yearly low → value opportunity")
-
-    return alerts
-
-
-# ---------------- OPTIONS ----------------
-
-def options_engine(rsi_val):
-
-    if rsi_val and rsi_val < 30:
-        return {
-            "strategy": "Bull Call Spread",
-            "reason": "Rebound expected",
-            "risk": "Limited risk bullish setup"
-        }
-
-    if rsi_val and rsi_val > 70:
-        return {
-            "strategy": "Bear Put Spread",
-            "reason": "Correction expected",
-            "risk": "Hedged bearish setup"
-        }
-
-    return {
-        "strategy": "Covered Call",
-        "reason": "Neutral market",
-        "risk": "Income strategy"
-    }
-
-
-# ---------------- EVENTS ----------------
-
-def events_engine(stock):
-    try:
-        s = yf.Ticker(stock)
-        cal = s.calendar
-
-        if cal is not None and len(cal) > 0:
-            return {"earnings": str(cal.index[0])}
-    except:
-        pass
-
-    return {"earnings": "N/A"}
-
-
-# ---------------- ANALYZE ----------------
+# ---------------- ANALYSIS ----------------
 
 def analyze_stock(raw):
 
@@ -206,7 +139,6 @@ def analyze_stock(raw):
 
         price = safe(df["Close"].iloc[-1])
         high = safe(df["High"].max())
-        low = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
@@ -220,56 +152,34 @@ def analyze_stock(raw):
         sector = info.get("sector", "Unknown")
         market = "INDIA" if ".NS" in t else "US"
 
-        score = 50
-
-        if r and r < 30:
-            score += 15
-        elif r and r > 70:
-            score -= 15
-
-        if price and ma50 and price > ma50:
-            score += 10
+        fundamentals = {
+            "pe": safe(info.get("trailingPE")),
+            "revenue_growth": safe(info.get("revenueGrowth"))
+        }
 
         beaten = (price / high) < 0.75 if high else False
 
-        score = max(0, min(100, int(score)))
-
-        tech = {
-            "rsi": r,
-            "ma50": ma50,
-            "trend": "Bullish" if price > ma50 else "Bearish"
-        }
+        gpt = gpt_analyst(t, price, r, ma50, beaten, fundamentals, sector)
 
         return {
             "ticker": t,
             "price": price,
             "market": market,
             "sector": sector,
-            "score": score,
 
-            "technicals": tech,
-            "fundamentals": {
-                "pe": safe(info.get("trailingPE")),
-                "profit_margin": safe(info.get("profitMargins")),
-                "revenue_growth": safe(info.get("revenueGrowth"))
+            "technicals": {
+                "rsi": r,
+                "ma50": ma50,
+                "trend": "Bullish" if price > ma50 else "Bearish"
             },
 
-            "high_low": {
-                "1y_high": high,
-                "1y_low": low
-            },
+            "fundamentals": fundamentals,
 
             "beaten_down": beaten,
 
-            "ai_view": ai_engine(price, r, ma50, beaten, score),
             "targets": target_engine(price, r),
-            "news": news_engine(t),
-            "alerts": alerts_engine({
-                "technicals": tech,
-                "beaten_down": beaten
-            }),
-            "options": options_engine(r),
-            "events": events_engine(t)
+
+            "gpt_analyst": gpt
         }
 
     except:
@@ -278,39 +188,12 @@ def analyze_stock(raw):
 
 # ---------------- POOLS ----------------
 
-US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX"]
-INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS"]
+US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META"]
+INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS"]
 
 
 def get_pool(market):
     return US_POOL if market == "US" else INDIA_POOL
-
-
-# ---------------- BEATEN DOWN ENGINE ----------------
-
-def beaten_engine(main, pool):
-
-    results = []
-
-    for p in pool:
-        if p == main["ticker"]:
-            continue
-
-        r = analyze_stock(p)
-        if not r:
-            continue
-
-        if r["market"] != main["market"]:
-            continue
-
-        if r["price"] and r["high_low"]["1y_high"]:
-            drop = r["price"] / r["high_low"]["1y_high"]
-
-            if drop < 0.7 and r["score"] >= 60:
-                r["drop_pct"] = round((1 - drop) * 100, 2)
-                results.append(r)
-
-    return sorted(results, key=lambda x: x["drop_pct"], reverse=True)
 
 
 # ---------------- API ----------------
@@ -324,22 +207,8 @@ def api(ticker: str):
 
     pool = get_pool(main["market"])
 
-    sector = []
-    beaten = beaten_engine(main, pool)
-
-    for p in pool:
-        if p == main["ticker"]:
-            continue
-
-        r = analyze_stock(p)
-        if not r:
-            continue
-
-        if r["market"] == main["market"] and r["sector"] == main["sector"]:
-            sector.append(r)
-
     return {
         "stock": main,
-        "sector_opportunities": sector,
-        "beaten_down_opportunities": beaten
+        "sector_opportunities": [],
+        "beaten_down_opportunities": []
     }
