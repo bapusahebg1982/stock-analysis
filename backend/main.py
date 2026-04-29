@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
-import pandas as pd
 import math
 
 app = FastAPI()
@@ -19,162 +18,117 @@ def root():
     return {"status": "Backend running"}
 
 
-# ---------------- HELPERS ----------------
-
-def safe_float(x):
+# ---------- UTIL ----------
+def safe(x):
     try:
         if x is None or (isinstance(x, float) and math.isnan(x)):
             return None
-        return round(float(x), 1)
+        return float(round(x, 2))
     except:
         return None
 
 
-def normalize_ticker(ticker: str):
-    ticker = ticker.upper().strip()
-
-    # Try US first, fallback India
-    if "." not in ticker:
-        test = yf.Ticker(ticker).history(period="5d")
-        if test.empty:
-            ticker = ticker + ".NS"
-
-    return ticker
+def normalize(t):
+    t = t.upper()
+    if "." not in t:
+        if yf.Ticker(t).history(period="5d").empty:
+            t += ".NS"
+    return t
 
 
-def compute_rsi(df, period=14):
+def rsi(df, period=14):
     delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 
-def is_beaten_down(price, high_1y):
+# ---------- CORE ANALYSIS ----------
+def analyze(ticker):
     try:
-        if not price or not high_1y:
-            return False
-        return (price / high_1y) < 0.7
-    except:
-        return False
+        t = normalize(ticker)
+        s = yf.Ticker(t)
 
+        df = s.history(period="1y")
+        df5 = s.history(period="5y")
 
-# ---------------- CORE ANALYSIS ----------------
-
-def analyze_stock(raw_ticker):
-    try:
-        ticker = normalize_ticker(raw_ticker)
-        stock = yf.Ticker(ticker)
-
-        df = stock.history(period="1y")
-        df5 = stock.history(period="5y")
-
-        if df.empty or len(df) < 50:
+        if df.empty:
             return None
 
-        price = safe_float(df["Close"].iloc[-1])
+        price = safe(df["Close"].iloc[-1])
+        high_1y = safe(df["High"].max())
+        low_1y = safe(df["Low"].min())
 
-        # RSI
-        df["RSI"] = compute_rsi(df)
-        rsi = safe_float(df["RSI"].iloc[-1])
+        r = safe(rsi(df).iloc[-1])
+        ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
 
-        ma50 = safe_float(df["Close"].rolling(50).mean().iloc[-1])
-        ma200 = safe_float(df["Close"].rolling(200).mean().iloc[-1]) if len(df) >= 200 else None
-
-        # Volume
-        avg_vol = safe_float(df["Volume"].rolling(20).mean().iloc[-1])
-        vol = safe_float(df["Volume"].iloc[-1])
-        volume_spike = bool(avg_vol and vol and vol > 1.5 * avg_vol)
-
-        # Fundamentals (safe)
+        info = {}
         try:
-            info = stock.get_info()
+            info = s.get_info()
         except:
-            info = {}
+            pass
 
-        pe = safe_float(info.get("trailingPE"))
-        profit_margin = safe_float(info.get("profitMargins"))
-        revenue_growth = safe_float(info.get("revenueGrowth"))
+        sector = info.get("sector", "Unknown")
 
-        # High / Low
-        high_1y = safe_float(df["High"].max())
-        low_1y = safe_float(df["Low"].min())
-
-        high_5y = safe_float(df5["High"].max()) if not df5.empty else None
-        low_5y = safe_float(df5["Low"].min()) if not df5.empty else None
-
-        # ---------------- SCORING ----------------
+        pe = safe(info.get("trailingPE"))
+        profit = safe(info.get("profitMargins"))
+        revenue = safe(info.get("revenueGrowth"))
 
         score = 50
         reasons = []
 
-        if rsi:
-            if rsi < 30:
-                score += 15
-                reasons.append("Oversold (possible rebound)")
-            elif rsi > 70:
-                score -= 15
-                reasons.append("Overbought (risk of pullback)")
+        if r and r < 30:
+            score += 15
+            reasons.append("Oversold condition")
+        elif r and r > 70:
+            score -= 15
+            reasons.append("Overbought condition")
 
         if price and ma50 and price > ma50:
             score += 10
-            reasons.append("Above 50-day moving average")
+            reasons.append("Above trend (MA50)")
 
-        if price and ma200 and price > ma200:
-            score += 10
-            reasons.append("Strong long-term trend")
-
-        if volume_spike:
+        if profit and profit > 0.15:
             score += 5
-            reasons.append("Unusual volume spike")
+            reasons.append("Strong profitability")
 
-        if profit_margin and profit_margin > 0.15:
+        if revenue and revenue > 0:
             score += 5
-            reasons.append("Strong profit margins")
-
-        if revenue_growth and revenue_growth > 0:
-            score += 5
-            reasons.append("Revenue growth positive")
+            reasons.append("Revenue growing")
 
         score = max(0, min(100, int(score)))
 
-        # ---------------- LAYMAN INSIGHT ----------------
+        beaten = (price / high_1y) < 0.7 if high_1y else False
 
-        if score >= 75:
-            summary = "Strong stock with momentum and solid fundamentals."
-        elif score >= 60:
-            summary = "Mixed signals. Needs confirmation before entry."
-        else:
-            summary = "Weak momentum. Higher risk or better alternatives exist."
+        # Simple target logic
+        target_1 = round(price * 1.1, 2)
+        target_2 = round(price * 1.25, 2)
 
         return {
-            "ticker": ticker,
+            "ticker": t,
             "price": price,
             "score": score,
-
+            "sector": sector,
             "fundamentals": {
                 "pe": pe,
-                "profit_margin": profit_margin,
-                "revenue_growth": revenue_growth
+                "profit_margin": profit,
+                "revenue_growth": revenue
             },
-
             "technicals": {
-                "rsi": rsi,
-                "ma50": ma50,
-                "ma200": ma200,
-                "volume_spike": volume_spike
+                "rsi": safe(r),
+                "ma50": ma50
             },
-
             "highs_lows": {
                 "1y_high": high_1y,
-                "1y_low": low_1y,
-                "5y_high": high_5y,
-                "5y_low": low_5y
+                "1y_low": low_1y
             },
-
-            "insights": {
-                "summary": summary,
-                "signals": reasons
+            "insights": reasons,
+            "beaten_down": beaten,
+            "targets": {
+                "short": target_1,
+                "mid": target_2,
+                "timeframe": "3-9 months"
             }
         }
 
@@ -182,58 +136,37 @@ def analyze_stock(raw_ticker):
         return None
 
 
-# ---------------- UNIVERSE ----------------
-
-UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA",
-    "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"
-]
-
-
-# ---------------- MAIN ANALYZE ----------------
-
+# ---------- MAIN ----------
 @app.get("/analyze/{ticker}")
-def analyze(ticker: str):
-    main = analyze_stock(ticker)
-
+def analyze_api(ticker: str):
+    main = analyze(ticker)
     if not main:
-        return {"error": "Invalid or insufficient data"}
+        return {"error": "Invalid ticker"}
 
-    better = []
+    universe = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA", "RELIANCE.NS", "INFY.NS", "TCS.NS"]
 
-    for t in UNIVERSE:
-        if t != main["ticker"]:
-            res = analyze_stock(t)
-            if res:
-                beat = is_beaten_down(res["price"], res["highs_lows"]["1y_high"])
+    same_sector = []
+    beaten_down = []
 
-                if res["score"] >= 65 or beat:
-                    res["is_beaten_down"] = beat
-                    better.append(res)
+    for u in universe:
+        if u != main["ticker"]:
+            r = analyze(u)
+            if not r:
+                continue
 
-    better = sorted(better, key=lambda x: x["score"], reverse=True)[:5]
+            # Sector filter
+            if r["sector"] == main["sector"] and r["score"] >= main["score"] - 5:
+                same_sector.append(r)
+
+            # Beaten down strong stocks
+            if r["beaten_down"] and r["score"] >= 65:
+                beaten_down.append(r)
+
+    same_sector = sorted(same_sector, key=lambda x: x["score"], reverse=True)[:5]
+    beaten_down = sorted(beaten_down, key=lambda x: x["score"], reverse=True)[:5]
 
     return {
         "stock": main,
-        "better_options": better
-    }
-
-
-# ---------------- OPPORTUNITIES (FILTERED) ----------------
-
-@app.get("/opportunities")
-def opportunities(max_price: float = 1000):
-    results = []
-
-    for t in UNIVERSE:
-        res = analyze_stock(t)
-        if res and res["price"] and res["price"] <= max_price:
-            beat = is_beaten_down(res["price"], res["highs_lows"]["1y_high"])
-
-            if res["score"] >= 65 or beat:
-                res["is_beaten_down"] = beat
-                results.append(res)
-
-    return {
-        "opportunities": sorted(results, key=lambda x: x["score"], reverse=True)
+        "sector_opportunities": same_sector,
+        "beaten_down_opportunities": beaten_down
     }
