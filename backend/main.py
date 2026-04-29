@@ -13,41 +13,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"status": "Backend running"}
+# ---------------- MARKET SEPARATION ----------------
+
+US_UNIVERSE = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"]
+
+INDIA_UNIVERSE = ["RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
 
 
-# ---------- UTIL ----------
-def safe(x):
-    try:
-        if x is None or (isinstance(x, float) and math.isnan(x)):
-            return None
-        return float(round(x, 2))
-    except:
-        return None
+def detect_market(ticker: str):
+    if ".NS" in ticker:
+        return "INDIA"
+    return "US"
 
 
 def normalize(t):
-    t = t.upper()
+    t = t.upper().strip()
     if "." not in t:
-        if yf.Ticker(t).history(period="5d").empty:
+        # try US first
+        test = yf.Ticker(t).history(period="5d")
+        if test.empty:
             t += ".NS"
     return t
 
 
-def rsi(df, period=14):
+def safe(x):
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return None
+        return round(float(x), 2)
+    except:
+        return None
+
+
+def rsi(df):
     delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 
-# ---------- CORE ANALYSIS ----------
-def analyze(ticker):
+# ---------------- CORE ANALYSIS ----------------
+
+def analyze_stock(raw):
     try:
-        t = normalize(ticker)
+        t = normalize(raw)
         s = yf.Ticker(t)
 
         df = s.history(period="1y")
@@ -57,11 +67,12 @@ def analyze(ticker):
             return None
 
         price = safe(df["Close"].iloc[-1])
-        high_1y = safe(df["High"].max())
-        low_1y = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
+
+        high_1y = safe(df["High"].max())
+        low_1y = safe(df["Low"].min())
 
         info = {}
         try:
@@ -70,103 +81,83 @@ def analyze(ticker):
             pass
 
         sector = info.get("sector", "Unknown")
-
-        pe = safe(info.get("trailingPE"))
-        profit = safe(info.get("profitMargins"))
-        revenue = safe(info.get("revenueGrowth"))
+        market = detect_market(t)
 
         score = 50
         reasons = []
 
         if r and r < 30:
             score += 15
-            reasons.append("Oversold condition")
+            reasons.append("Oversold")
         elif r and r > 70:
             score -= 15
-            reasons.append("Overbought condition")
+            reasons.append("Overbought")
 
         if price and ma50 and price > ma50:
             score += 10
-            reasons.append("Above trend (MA50)")
-
-        if profit and profit > 0.15:
-            score += 5
-            reasons.append("Strong profitability")
-
-        if revenue and revenue > 0:
-            score += 5
-            reasons.append("Revenue growing")
-
-        score = max(0, min(100, int(score)))
+            reasons.append("Above trend")
 
         beaten = (price / high_1y) < 0.7 if high_1y else False
-
-        # Simple target logic
-        target_1 = round(price * 1.1, 2)
-        target_2 = round(price * 1.25, 2)
 
         return {
             "ticker": t,
             "price": price,
             "score": score,
             "sector": sector,
-            "fundamentals": {
-                "pe": pe,
-                "profit_margin": profit,
-                "revenue_growth": revenue
-            },
+            "market": market,
             "technicals": {
-                "rsi": safe(r),
+                "rsi": r,
                 "ma50": ma50
             },
-            "highs_lows": {
-                "1y_high": high_1y,
-                "1y_low": low_1y
-            },
-            "insights": reasons,
+            "high_1y": high_1y,
+            "low_1y": low_1y,
             "beaten_down": beaten,
-            "targets": {
-                "short": target_1,
-                "mid": target_2,
-                "timeframe": "3-9 months"
-            }
+            "signals": reasons
         }
 
     except:
         return None
 
 
-# ---------- MAIN ----------
+# ---------------- MAIN API ----------------
+
 @app.get("/analyze/{ticker}")
 def analyze_api(ticker: str):
-    main = analyze(ticker)
+
+    main = analyze_stock(ticker)
     if not main:
         return {"error": "Invalid ticker"}
 
-    universe = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA", "RELIANCE.NS", "INFY.NS", "TCS.NS"]
+    market = main["market"]
+    sector = main["sector"]
 
-    same_sector = []
-    beaten_down = []
+    universe = US_UNIVERSE if market == "US" else INDIA_UNIVERSE
+
+    sector_opps = []
+    beaten_opps = []
 
     for u in universe:
-        if u != main["ticker"]:
-            r = analyze(u)
-            if not r:
-                continue
+        r = analyze_stock(u)
+        if not r:
+            continue
 
-            # Sector filter
-            if r["sector"] == main["sector"] and r["score"] >= main["score"] - 5:
-                same_sector.append(r)
+        # SAME MARKET FIX (CRITICAL)
+        if r["market"] != market:
+            continue
 
-            # Beaten down strong stocks
-            if r["beaten_down"] and r["score"] >= 65:
-                beaten_down.append(r)
+        # SAME SECTOR OPPORTUNITIES
+        if r["sector"] == sector and r["score"] >= main["score"] - 5:
+            sector_opps.append(r)
 
-    same_sector = sorted(same_sector, key=lambda x: x["score"], reverse=True)[:5]
-    beaten_down = sorted(beaten_down, key=lambda x: x["score"], reverse=True)[:5]
+        # BEATEN DOWN (ALL SECTORS SAME MARKET)
+        if r["beaten_down"] and r["score"] >= 65:
+            beaten_opps.append(r)
+
+    sector_opps = sorted(sector_opps, key=lambda x: x["score"], reverse=True)[:5]
+    beaten_opps = sorted(beaten_opps, key=lambda x: x["score"], reverse=True)[:5]
 
     return {
         "stock": main,
-        "sector_opportunities": same_sector,
-        "beaten_down_opportunities": beaten_down
+        "sector_opportunities": sector_opps,
+        "beaten_down_opportunities": beaten_opps
     }
