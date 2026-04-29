@@ -13,28 +13,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- MARKET SEPARATION ----------------
 
-US_UNIVERSE = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"]
-
-INDIA_UNIVERSE = ["RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
-
-
-def detect_market(ticker: str):
-    if ".NS" in ticker:
-        return "INDIA"
-    return "US"
-
-
-def normalize(t):
-    t = t.upper().strip()
-    if "." not in t:
-        # try US first
-        test = yf.Ticker(t).history(period="5d")
-        if test.empty:
-            t += ".NS"
-    return t
-
+# ---------------- UTIL ----------------
 
 def safe(x):
     try:
@@ -45,6 +25,14 @@ def safe(x):
         return None
 
 
+def normalize(t):
+    t = t.upper().strip()
+    if "." not in t:
+        if yf.Ticker(t).history(period="5d").empty:
+            t += ".NS"
+    return t
+
+
 def rsi(df):
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -53,7 +41,7 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- CORE ANALYSIS ----------------
+# ---------------- ANALYSIS ----------------
 
 def analyze_stock(raw):
     try:
@@ -61,18 +49,15 @@ def analyze_stock(raw):
         s = yf.Ticker(t)
 
         df = s.history(period="1y")
-        df5 = s.history(period="5y")
 
         if df.empty:
             return None
 
         price = safe(df["Close"].iloc[-1])
+        high_1y = safe(df["High"].max())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
-
-        high_1y = safe(df["High"].max())
-        low_1y = safe(df["Low"].min())
 
         info = {}
         try:
@@ -81,7 +66,6 @@ def analyze_stock(raw):
             pass
 
         sector = info.get("sector", "Unknown")
-        market = detect_market(t)
 
         score = 50
         reasons = []
@@ -95,22 +79,20 @@ def analyze_stock(raw):
 
         if price and ma50 and price > ma50:
             score += 10
-            reasons.append("Above trend")
+            reasons.append("Uptrend")
 
-        beaten = (price / high_1y) < 0.7 if high_1y else False
+        # Beaten down (IMPORTANT FIX)
+        beaten = False
+        if price and high_1y:
+            beaten = (price / high_1y) < 0.75  # relaxed threshold
+
+        score = max(0, min(100, int(score)))
 
         return {
             "ticker": t,
             "price": price,
             "score": score,
             "sector": sector,
-            "market": market,
-            "technicals": {
-                "rsi": r,
-                "ma50": ma50
-            },
-            "high_1y": high_1y,
-            "low_1y": low_1y,
             "beaten_down": beaten,
             "signals": reasons
         }
@@ -119,7 +101,15 @@ def analyze_stock(raw):
         return None
 
 
-# ---------------- MAIN API ----------------
+# ---------------- UNIVERSAL LIST ----------------
+
+UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA",
+    "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"
+]
+
+
+# ---------------- API ----------------
 
 @app.get("/analyze/{ticker}")
 def analyze_api(ticker: str):
@@ -128,31 +118,27 @@ def analyze_api(ticker: str):
     if not main:
         return {"error": "Invalid ticker"}
 
-    market = main["market"]
-    sector = main["sector"]
-
-    universe = US_UNIVERSE if market == "US" else INDIA_UNIVERSE
-
     sector_opps = []
     beaten_opps = []
 
-    for u in universe:
+    for u in UNIVERSE:
+        if u == main["ticker"]:
+            continue  # 🔥 CRITICAL FIX (no self recommendation)
+
         r = analyze_stock(u)
         if not r:
             continue
 
-        # SAME MARKET FIX (CRITICAL)
-        if r["market"] != market:
-            continue
+        # SAME SECTOR LOGIC (FIXED)
+        if r["sector"] == main["sector"]:
+            if r["score"] >= main["score"] - 10:
+                sector_opps.append(r)
 
-        # SAME SECTOR OPPORTUNITIES
-        if r["sector"] == sector and r["score"] >= main["score"] - 5:
-            sector_opps.append(r)
-
-        # BEATEN DOWN (ALL SECTORS SAME MARKET)
-        if r["beaten_down"] and r["score"] >= 65:
+        # BEATEN DOWN (NO SECTOR LIMIT)
+        if r["beaten_down"] and r["score"] >= 55:
             beaten_opps.append(r)
 
+    # Sorting
     sector_opps = sorted(sector_opps, key=lambda x: x["score"], reverse=True)[:5]
     beaten_opps = sorted(beaten_opps, key=lambda x: x["score"], reverse=True)[:5]
 
