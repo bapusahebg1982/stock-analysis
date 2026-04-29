@@ -32,19 +32,23 @@ def compute_rsi(df, period=14):
 def analyze(ticker: str):
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period="6mo")
+        df = stock.history(period="1y")
 
         if df.empty or len(df) < 50:
             return {"error": "Not enough data"}
 
         price = float(df["Close"].iloc[-1])
 
-        # Indicators
+        # RSI
         df["RSI"] = compute_rsi(df)
         rsi = float(df["RSI"].iloc[-1])
 
+        # Moving averages (safe)
         ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
-        ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
+
+        ma200 = None
+        if len(df) >= 200:
+            ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
 
         score = 50
 
@@ -57,7 +61,7 @@ def analyze(ticker: str):
         # Trend scoring
         if price > ma50:
             score += 10
-        if price > ma200:
+        if ma200 and price > ma200:
             score += 10
 
         score = max(0, min(100, int(score)))
@@ -69,9 +73,12 @@ def analyze(ticker: str):
             "technicals": {
                 "rsi": round(rsi, 2),
                 "ma50": round(ma50, 2),
-                "ma200": round(ma200, 2)
+                "ma200": round(ma200, 2) if ma200 else None
             }
         }
+
+    except Exception as e:
+        return {"error": str(e)}
 
     except Exception as e:
         return {"error": str(e)}
