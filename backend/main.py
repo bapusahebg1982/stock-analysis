@@ -33,10 +33,6 @@ def normalize(t):
     return t
 
 
-def detect_market(t):
-    return "INDIA" if ".NS" in t else "US"
-
-
 def rsi(df):
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -45,7 +41,7 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- CORE ANALYSIS ----------------
+# ---------------- CORE ENGINE ----------------
 
 def analyze_stock(raw):
     try:
@@ -57,10 +53,12 @@ def analyze_stock(raw):
             return None
 
         price = safe(df["Close"].iloc[-1])
-        high_1y = safe(df["High"].max())
+        high = safe(df["High"].max())
+        low = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
+        ma200 = safe(df["Close"].rolling(200).mean().iloc[-1])
 
         info = {}
         try:
@@ -69,102 +67,93 @@ def analyze_stock(raw):
             pass
 
         sector = info.get("sector", "Unknown")
-        market = detect_market(t)
 
+        # ---------------- FUNDAMENTALS ----------------
+        fundamentals = {
+            "pe": safe(info.get("trailingPE")),
+            "profit_margin": safe(info.get("profitMargins")),
+            "revenue_growth": safe(info.get("revenueGrowth"))
+        }
+
+        # ---------------- TECHNICALS ----------------
+        trend = "Neutral"
+        if price and ma50:
+            if price > ma50:
+                trend = "Bullish"
+            else:
+                trend = "Bearish"
+
+        technicals = {
+            "rsi": r,
+            "ma50": ma50,
+            "ma200": ma200,
+            "trend": trend
+        }
+
+        # ---------------- SCORE ----------------
         score = 50
-        signals = []
+        reasons = []
 
         if r and r < 30:
             score += 15
-            signals.append("Oversold")
+            reasons.append("Oversold")
         elif r and r > 70:
             score -= 15
-            signals.append("Overbought")
+            reasons.append("Overbought")
 
-        if price and ma50 and price > ma50:
+        if trend == "Bullish":
             score += 10
-            signals.append("Uptrend")
+            reasons.append("Uptrend confirmed")
 
-        beaten = (price / high_1y) < 0.75 if high_1y else False
+        score = max(0, min(100, int(score)))
+
+        beaten = (price / high) < 0.75 if high else False
+
+        # ---------------- INVESTMENT VIEW ----------------
+
+        short_target = round(price * 1.08, 2)
+        long_target = round(price * 1.25, 2)
+
+        short_view = {
+            "horizon": "1–3 months",
+            "target": short_target,
+            "thesis": "Momentum + technical continuation expected",
+            "risk": "Medium"
+        }
+
+        long_view = {
+            "horizon": "6–12 months",
+            "target": long_target,
+            "thesis": "Fundamental recovery + sector growth",
+            "risk": "Medium-Low"
+        }
 
         return {
             "ticker": t,
             "price": price,
-            "score": score,
             "sector": sector,
-            "market": market,
-            "beaten_down": beaten,
-            "signals": signals
+            "score": score,
+
+            "fundamentals": fundamentals,
+            "technicals": technicals,
+
+            "high_low": {
+                "1y_high": high,
+                "1y_low": low
+            },
+
+            "signals": reasons,
+
+            "investment_view": {
+                "short_term": short_view,
+                "long_term": long_view
+            },
+
+            "beaten_down": beaten
         }
 
     except:
         return None
-
-
-# ---------------- PEER DISCOVERY (KEY FIX) ----------------
-
-def get_dynamic_peers(sector, market, exclude):
-
-    # Instead of universe → we scan index-like candidates
-    if market == "US":
-        candidates = [
-            "AAPL","MSFT","GOOGL","NVDA","AMZN","META","TSLA","NFLX","INTC","AMD","ORCL"
-        ]
-    else:
-        candidates = [
-            "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
-            "SBIN.NS","LT.NS","WIPRO.NS"
-        ]
-
-    results = []
-
-    for c in candidates:
-        if c == exclude:
-            continue
-
-        r = analyze_stock(c)
-        if not r:
-            continue
-
-        # ONLY SAME MARKET
-        if r["market"] != market:
-            continue
-
-        # sector similarity (soft match, not strict)
-        if r["sector"] == sector:
-            results.append(r)
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)[:8]
-
-
-# ---------------- BEATEN DOWN SCREENER ----------------
-
-def get_beaten_down(market):
-
-    if market == "US":
-        candidates = [
-            "AAPL","MSFT","GOOGL","NVDA","TSLA","META","AMD","INTC"
-        ]
-    else:
-        candidates = [
-            "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
-            "SBIN.NS","LT.NS"
-        ]
-
-    results = []
-
-    for c in candidates:
-        r = analyze_stock(c)
-        if not r:
-            continue
-
-        if r["market"] != market:
-            continue
-
-        if r["beaten_down"] and r["score"] >= 60:
-            results.append(r)
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)[:8]
 
 
 # ---------------- API ----------------
@@ -176,13 +165,32 @@ def analyze_api(ticker: str):
     if not main:
         return {"error": "Invalid ticker"}
 
-    sector_opps = get_dynamic_peers(
-        main["sector"],
-        main["market"],
-        main["ticker"]
-    )
+    market_universe = [
+        "AAPL","MSFT","GOOGL","NVDA","TSLA",
+        "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS"
+    ]
 
-    beaten_opps = get_beaten_down(main["market"])
+    sector_opps = []
+    beaten_opps = []
+
+    for u in market_universe:
+        if u == main["ticker"]:
+            continue
+
+        r = analyze_stock(u)
+        if not r:
+            continue
+
+        # same sector logic
+        if r["sector"] == main["sector"] and r["score"] >= main["score"] - 10:
+            sector_opps.append(r)
+
+        # beaten down logic (same market implied via suffix)
+        if r["beaten_down"] and r["score"] >= 60:
+            beaten_opps.append(r)
+
+    sector_opps = sorted(sector_opps, key=lambda x: x["score"], reverse=True)[:5]
+    beaten_opps = sorted(beaten_opps, key=lambda x: x["score"], reverse=True)[:5]
 
     return {
         "stock": main,
