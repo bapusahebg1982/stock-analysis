@@ -14,7 +14,7 @@ app.add_middleware(
 )
 
 
-# ---------------- UTIL ----------------
+# ---------------- SAFE HELPERS ----------------
 
 def safe(x):
     try:
@@ -41,7 +41,7 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- AI REASONING ENGINE ----------------
+# ---------------- AI REASONING ----------------
 
 def ai_reasoning(price, rsi_val, ma50, beaten, score):
 
@@ -56,36 +56,120 @@ def ai_reasoning(price, rsi_val, ma50, beaten, score):
 
     if rsi_val is not None:
         if rsi_val < 30:
-            reasons.append("Oversold condition → rebound potential")
+            reasons.append("Oversold → rebound probability high")
         elif rsi_val > 70:
-            reasons.append("Overbought → short-term risk")
+            reasons.append("Overbought → correction risk")
 
     if price and ma50:
         if price > ma50:
-            reasons.append("Above trend → bullish momentum")
+            reasons.append("Above MA50 → bullish momentum")
         else:
-            reasons.append("Below trend → weak momentum")
+            reasons.append("Below MA50 → weak trend")
 
     if beaten:
-        reasons.append("Trading near yearly lows → value zone")
-
-    timeframe = (
-        "3–9 months upside" if decision == "BUY"
-        else "1–3 months consolidation" if decision == "HOLD"
-        else "No strong setup"
-    )
+        reasons.append("Near 1Y lows → potential value zone")
 
     return {
         "decision": decision,
         "reasoning": reasons,
-        "timeframe": timeframe,
+        "timeframe": "3–9 months (BUY) / 1–3 months (HOLD/AVOID)",
         "risk": "High" if decision == "AVOID" else "Medium"
     }
+
+
+# ---------------- NEWS ----------------
+
+def get_news(stock):
+    try:
+        s = yf.Ticker(stock)
+        news = s.news or []
+
+        processed = []
+
+        for n in news[:5]:
+            title = n.get("title", "")
+
+            score = 0
+            if any(w in title.lower() for w in ["rise","surge","beat","strong"]):
+                score += 1
+            if any(w in title.lower() for w in ["fall","drop","weak","loss"]):
+                score -= 1
+
+            processed.append({
+                "title": title,
+                "sentiment": score
+            })
+
+        return processed
+    except:
+        return []
+
+
+# ---------------- ALERTS ----------------
+
+def get_alerts(stock):
+    alerts = []
+
+    t = stock["technicals"]
+
+    if t["rsi"] and t["rsi"] < 30:
+        alerts.append("RSI oversold → bounce setup")
+
+    if t["trend"] == "Bullish":
+        alerts.append("Bullish trend confirmed")
+
+    if stock["beaten_down"]:
+        alerts.append("Stock near yearly lows → value alert")
+
+    return alerts
+
+
+# ---------------- OPTIONS ----------------
+
+def options_strategy(rsi_val):
+
+    if rsi_val and rsi_val < 30:
+        return {
+            "strategy": "Bull Call Spread",
+            "reason": "Oversold rebound setup",
+            "risk": "Limited risk bullish trade"
+        }
+
+    if rsi_val and rsi_val > 70:
+        return {
+            "strategy": "Bear Put Spread",
+            "reason": "Overbought reversal setup",
+            "risk": "Hedged bearish trade"
+        }
+
+    return {
+        "strategy": "Covered Call",
+        "reason": "Neutral market conditions",
+        "risk": "Income generation strategy"
+    }
+
+
+# ---------------- EVENTS ----------------
+
+def get_events(stock):
+    try:
+        s = yf.Ticker(stock)
+        cal = s.calendar
+
+        if cal is not None and len(cal) > 0:
+            return {
+                "earnings": str(cal.index[0])
+            }
+    except:
+        pass
+
+    return {"earnings": "N/A"}
 
 
 # ---------------- CORE ANALYSIS ----------------
 
 def analyze_stock(raw):
+
     try:
         t = normalize(raw)
         s = yf.Ticker(t)
@@ -96,11 +180,9 @@ def analyze_stock(raw):
 
         price = safe(df["Close"].iloc[-1])
         high = safe(df["High"].max())
-        low = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
-        ma200 = safe(df["Close"].rolling(200).mean().iloc[-1])
 
         info = {}
         try:
@@ -111,7 +193,6 @@ def analyze_stock(raw):
         sector = info.get("sector", "Unknown")
         market = "INDIA" if ".NS" in t else "US"
 
-        # ---------------- SCORE ----------------
         score = 50
 
         if r and r < 30:
@@ -126,8 +207,13 @@ def analyze_stock(raw):
 
         score = max(0, min(100, int(score)))
 
-        # ---------------- AI VIEW ----------------
-        ai_view = ai_reasoning(price, r, ma50, beaten, score)
+        tech = {
+            "rsi": r,
+            "ma50": ma50,
+            "trend": "Bullish" if price > ma50 else "Bearish"
+        }
+
+        ai = ai_reasoning(price, r, ma50, beaten, score)
 
         return {
             "ticker": t,
@@ -136,37 +222,38 @@ def analyze_stock(raw):
             "sector": sector,
             "score": score,
 
+            "technicals": tech,
+
             "fundamentals": {
                 "pe": safe(info.get("trailingPE")),
                 "profit_margin": safe(info.get("profitMargins")),
                 "revenue_growth": safe(info.get("revenueGrowth"))
             },
 
-            "technicals": {
-                "rsi": r,
-                "ma50": ma50,
-                "ma200": ma200,
-                "trend": "Bullish" if price > ma50 else "Bearish"
-            },
-
             "high_low": {
-                "1y_high": high,
-                "1y_low": low
+                "1y_high": high
             },
 
-            "signals": ai_view["reasoning"],
-            "ai_view": ai_view,
-            "beaten_down": beaten
+            "beaten_down": beaten,
+
+            "ai_view": ai,
+            "news": get_news(t),
+            "alerts": get_alerts({
+                "technicals": tech,
+                "beaten_down": beaten
+            }),
+            "options": options_strategy(r),
+            "events": get_events(t)
         }
 
     except:
         return None
 
 
-# ---------------- SIMPLE MARKET POOLS ----------------
+# ---------------- SIMPLE POOLS ----------------
 
-US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX","AMD","INTC"]
-INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","LT.NS"]
+US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX"]
+INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS"]
 
 
 def get_pool(market):
@@ -198,16 +285,14 @@ def analyze_api(ticker: str):
         if r["market"] != main["market"]:
             continue
 
-        # sector logic
         if r["sector"] == main["sector"] and r["score"] >= main["score"] - 10:
             sector_opps.append(r)
 
-        # beaten logic
         if r["beaten_down"] and r["score"] >= 60:
             beaten_opps.append(r)
 
     return {
         "stock": main,
-        "sector_opportunities": sector_opps[:5],
-        "beaten_down_opportunities": beaten_opps[:5]
+        "sector_opportunities": sector_opps,
+        "beaten_down_opportunities": beaten_opps
     }
