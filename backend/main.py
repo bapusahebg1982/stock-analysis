@@ -14,7 +14,7 @@ app.add_middleware(
 )
 
 
-# ---------------- UTIL ----------------
+# ---------------- HELPERS ----------------
 
 def safe(x):
     try:
@@ -33,6 +33,10 @@ def normalize(t):
     return t
 
 
+def detect_market(t):
+    return "INDIA" if ".NS" in t else "US"
+
+
 def rsi(df):
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -41,7 +45,7 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- ANALYSIS ----------------
+# ---------------- CORE ANALYSIS ----------------
 
 def analyze_stock(raw):
     try:
@@ -49,7 +53,6 @@ def analyze_stock(raw):
         s = yf.Ticker(t)
 
         df = s.history(period="1y")
-
         if df.empty:
             return None
 
@@ -66,47 +69,102 @@ def analyze_stock(raw):
             pass
 
         sector = info.get("sector", "Unknown")
+        market = detect_market(t)
 
         score = 50
-        reasons = []
+        signals = []
 
         if r and r < 30:
             score += 15
-            reasons.append("Oversold")
+            signals.append("Oversold")
         elif r and r > 70:
             score -= 15
-            reasons.append("Overbought")
+            signals.append("Overbought")
 
         if price and ma50 and price > ma50:
             score += 10
-            reasons.append("Uptrend")
+            signals.append("Uptrend")
 
-        # Beaten down (IMPORTANT FIX)
-        beaten = False
-        if price and high_1y:
-            beaten = (price / high_1y) < 0.75  # relaxed threshold
-
-        score = max(0, min(100, int(score)))
+        beaten = (price / high_1y) < 0.75 if high_1y else False
 
         return {
             "ticker": t,
             "price": price,
             "score": score,
             "sector": sector,
+            "market": market,
             "beaten_down": beaten,
-            "signals": reasons
+            "signals": signals
         }
 
     except:
         return None
 
 
-# ---------------- UNIVERSAL LIST ----------------
+# ---------------- PEER DISCOVERY (KEY FIX) ----------------
 
-UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA",
-    "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"
-]
+def get_dynamic_peers(sector, market, exclude):
+
+    # Instead of universe → we scan index-like candidates
+    if market == "US":
+        candidates = [
+            "AAPL","MSFT","GOOGL","NVDA","AMZN","META","TSLA","NFLX","INTC","AMD","ORCL"
+        ]
+    else:
+        candidates = [
+            "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
+            "SBIN.NS","LT.NS","WIPRO.NS"
+        ]
+
+    results = []
+
+    for c in candidates:
+        if c == exclude:
+            continue
+
+        r = analyze_stock(c)
+        if not r:
+            continue
+
+        # ONLY SAME MARKET
+        if r["market"] != market:
+            continue
+
+        # sector similarity (soft match, not strict)
+        if r["sector"] == sector:
+            results.append(r)
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)[:8]
+
+
+# ---------------- BEATEN DOWN SCREENER ----------------
+
+def get_beaten_down(market):
+
+    if market == "US":
+        candidates = [
+            "AAPL","MSFT","GOOGL","NVDA","TSLA","META","AMD","INTC"
+        ]
+    else:
+        candidates = [
+            "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
+            "SBIN.NS","LT.NS"
+        ]
+
+    results = []
+
+    for c in candidates:
+        r = analyze_stock(c)
+        if not r:
+            continue
+
+        if r["market"] != market:
+            continue
+
+        if r["beaten_down"] and r["score"] >= 60:
+            results.append(r)
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)[:8]
 
 
 # ---------------- API ----------------
@@ -118,29 +176,13 @@ def analyze_api(ticker: str):
     if not main:
         return {"error": "Invalid ticker"}
 
-    sector_opps = []
-    beaten_opps = []
+    sector_opps = get_dynamic_peers(
+        main["sector"],
+        main["market"],
+        main["ticker"]
+    )
 
-    for u in UNIVERSE:
-        if u == main["ticker"]:
-            continue  # 🔥 CRITICAL FIX (no self recommendation)
-
-        r = analyze_stock(u)
-        if not r:
-            continue
-
-        # SAME SECTOR LOGIC (FIXED)
-        if r["sector"] == main["sector"]:
-            if r["score"] >= main["score"] - 10:
-                sector_opps.append(r)
-
-        # BEATEN DOWN (NO SECTOR LIMIT)
-        if r["beaten_down"] and r["score"] >= 55:
-            beaten_opps.append(r)
-
-    # Sorting
-    sector_opps = sorted(sector_opps, key=lambda x: x["score"], reverse=True)[:5]
-    beaten_opps = sorted(beaten_opps, key=lambda x: x["score"], reverse=True)[:5]
+    beaten_opps = get_beaten_down(main["market"])
 
     return {
         "stock": main,
