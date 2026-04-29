@@ -14,7 +14,7 @@ app.add_middleware(
 )
 
 
-# ---------------- SAFE HELPERS ----------------
+# ---------------- UTIL ----------------
 
 def safe(x):
     try:
@@ -41,9 +41,37 @@ def rsi(df):
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- AI REASONING ----------------
+# ---------------- TARGET ENGINE ----------------
 
-def ai_reasoning(price, rsi_val, ma50, beaten, score):
+def target_engine(price, rsi_val):
+
+    if not price:
+        return None
+
+    if rsi_val and rsi_val < 30:
+        return {
+            "buy_target": round(price * 1.05, 2),
+            "mid_target": round(price * 1.15, 2),
+            "sell_target": round(price * 1.30, 2)
+        }
+
+    if rsi_val and rsi_val > 70:
+        return {
+            "buy_target": round(price * 0.95, 2),
+            "mid_target": round(price * 0.90, 2),
+            "sell_target": round(price * 0.85, 2)
+        }
+
+    return {
+        "buy_target": round(price * 1.05, 2),
+        "mid_target": round(price * 1.10, 2),
+        "sell_target": round(price * 1.18, 2)
+    }
+
+
+# ---------------- AI ENGINE ----------------
+
+def ai_engine(price, rsi_val, ma50, beaten, score):
 
     if score >= 75:
         decision = "BUY"
@@ -54,7 +82,7 @@ def ai_reasoning(price, rsi_val, ma50, beaten, score):
 
     reasons = []
 
-    if rsi_val is not None:
+    if rsi_val:
         if rsi_val < 30:
             reasons.append("Oversold → rebound probability high")
         elif rsi_val > 70:
@@ -62,111 +90,109 @@ def ai_reasoning(price, rsi_val, ma50, beaten, score):
 
     if price and ma50:
         if price > ma50:
-            reasons.append("Above MA50 → bullish momentum")
+            reasons.append("Above MA50 → bullish trend")
         else:
             reasons.append("Below MA50 → weak trend")
 
     if beaten:
-        reasons.append("Near 1Y lows → potential value zone")
+        reasons.append("Near 1Y low → value zone")
 
     return {
         "decision": decision,
         "reasoning": reasons,
-        "timeframe": "3–9 months (BUY) / 1–3 months (HOLD/AVOID)",
+        "timeframe": "3–9 months",
         "risk": "High" if decision == "AVOID" else "Medium"
     }
 
 
 # ---------------- NEWS ----------------
 
-def get_news(stock):
+def news_engine(stock):
     try:
         s = yf.Ticker(stock)
         news = s.news or []
 
-        processed = []
+        out = []
 
         for n in news[:5]:
             title = n.get("title", "")
 
-            score = 0
+            sentiment = 0
             if any(w in title.lower() for w in ["rise","surge","beat","strong"]):
-                score += 1
+                sentiment += 1
             if any(w in title.lower() for w in ["fall","drop","weak","loss"]):
-                score -= 1
+                sentiment -= 1
 
-            processed.append({
+            out.append({
                 "title": title,
-                "sentiment": score
+                "sentiment": sentiment
             })
 
-        return processed
+        return out
     except:
         return []
 
 
 # ---------------- ALERTS ----------------
 
-def get_alerts(stock):
-    alerts = []
+def alerts_engine(stock):
 
+    alerts = []
     t = stock["technicals"]
 
     if t["rsi"] and t["rsi"] < 30:
         alerts.append("RSI oversold → bounce setup")
 
     if t["trend"] == "Bullish":
-        alerts.append("Bullish trend confirmed")
+        alerts.append("Bullish momentum confirmed")
 
     if stock["beaten_down"]:
-        alerts.append("Stock near yearly lows → value alert")
+        alerts.append("Stock near yearly low → value opportunity")
 
     return alerts
 
 
 # ---------------- OPTIONS ----------------
 
-def options_strategy(rsi_val):
+def options_engine(rsi_val):
 
     if rsi_val and rsi_val < 30:
         return {
             "strategy": "Bull Call Spread",
-            "reason": "Oversold rebound setup",
-            "risk": "Limited risk bullish trade"
+            "reason": "Rebound expected",
+            "risk": "Limited risk bullish setup"
         }
 
     if rsi_val and rsi_val > 70:
         return {
             "strategy": "Bear Put Spread",
-            "reason": "Overbought reversal setup",
-            "risk": "Hedged bearish trade"
+            "reason": "Correction expected",
+            "risk": "Hedged bearish setup"
         }
 
     return {
         "strategy": "Covered Call",
-        "reason": "Neutral market conditions",
-        "risk": "Income generation strategy"
+        "reason": "Neutral market",
+        "risk": "Income strategy"
     }
 
 
 # ---------------- EVENTS ----------------
 
-def get_events(stock):
+def events_engine(stock):
     try:
         s = yf.Ticker(stock)
         cal = s.calendar
 
         if cal is not None and len(cal) > 0:
-            return {
-                "earnings": str(cal.index[0])
-            }
+            return {"earnings": str(cal.index[0])}
     except:
         pass
 
     return {"earnings": "N/A"}
 
 
-# ---------------- CORE ANALYSIS ----------------
+# ---------------- ANALYZE ----------------
 
 def analyze_stock(raw):
 
@@ -180,6 +206,7 @@ def analyze_stock(raw):
 
         price = safe(df["Close"].iloc[-1])
         high = safe(df["High"].max())
+        low = safe(df["Low"].min())
 
         r = safe(rsi(df).iloc[-1])
         ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
@@ -213,8 +240,6 @@ def analyze_stock(raw):
             "trend": "Bullish" if price > ma50 else "Bearish"
         }
 
-        ai = ai_reasoning(price, r, ma50, beaten, score)
-
         return {
             "ticker": t,
             "price": price,
@@ -223,7 +248,6 @@ def analyze_stock(raw):
             "score": score,
 
             "technicals": tech,
-
             "fundamentals": {
                 "pe": safe(info.get("trailingPE")),
                 "profit_margin": safe(info.get("profitMargins")),
@@ -231,26 +255,28 @@ def analyze_stock(raw):
             },
 
             "high_low": {
-                "1y_high": high
+                "1y_high": high,
+                "1y_low": low
             },
 
             "beaten_down": beaten,
 
-            "ai_view": ai,
-            "news": get_news(t),
-            "alerts": get_alerts({
+            "ai_view": ai_engine(price, r, ma50, beaten, score),
+            "targets": target_engine(price, r),
+            "news": news_engine(t),
+            "alerts": alerts_engine({
                 "technicals": tech,
                 "beaten_down": beaten
             }),
-            "options": options_strategy(r),
-            "events": get_events(t)
+            "options": options_engine(r),
+            "events": events_engine(t)
         }
 
     except:
         return None
 
 
-# ---------------- SIMPLE POOLS ----------------
+# ---------------- POOLS ----------------
 
 US_POOL = ["AAPL","MSFT","GOOGL","NVDA","TSLA","AMZN","META","NFLX"]
 INDIA_POOL = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS"]
@@ -260,19 +286,11 @@ def get_pool(market):
     return US_POOL if market == "US" else INDIA_POOL
 
 
-# ---------------- API ----------------
+# ---------------- BEATEN DOWN ENGINE ----------------
 
-@app.get("/analyze/{ticker}")
-def analyze_api(ticker: str):
+def beaten_engine(main, pool):
 
-    main = analyze_stock(ticker)
-    if not main:
-        return {"error": "Invalid ticker"}
-
-    pool = get_pool(main["market"])
-
-    sector_opps = []
-    beaten_opps = []
+    results = []
 
     for p in pool:
         if p == main["ticker"]:
@@ -285,14 +303,43 @@ def analyze_api(ticker: str):
         if r["market"] != main["market"]:
             continue
 
-        if r["sector"] == main["sector"] and r["score"] >= main["score"] - 10:
-            sector_opps.append(r)
+        if r["price"] and r["high_low"]["1y_high"]:
+            drop = r["price"] / r["high_low"]["1y_high"]
 
-        if r["beaten_down"] and r["score"] >= 60:
-            beaten_opps.append(r)
+            if drop < 0.7 and r["score"] >= 60:
+                r["drop_pct"] = round((1 - drop) * 100, 2)
+                results.append(r)
+
+    return sorted(results, key=lambda x: x["drop_pct"], reverse=True)
+
+
+# ---------------- API ----------------
+
+@app.get("/analyze/{ticker}")
+def api(ticker: str):
+
+    main = analyze_stock(ticker)
+    if not main:
+        return {"error": "Invalid ticker"}
+
+    pool = get_pool(main["market"])
+
+    sector = []
+    beaten = beaten_engine(main, pool)
+
+    for p in pool:
+        if p == main["ticker"]:
+            continue
+
+        r = analyze_stock(p)
+        if not r:
+            continue
+
+        if r["market"] == main["market"] and r["sector"] == main["sector"]:
+            sector.append(r)
 
     return {
         "stock": main,
-        "sector_opportunities": sector_opps,
-        "beaten_down_opportunities": beaten_opps
+        "sector_opportunities": sector,
+        "beaten_down_opportunities": beaten
     }
