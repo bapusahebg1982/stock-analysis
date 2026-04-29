@@ -18,6 +18,7 @@ app.add_middleware(
 def root():
     return {"status": "Backend running"}
 
+
 # RSI
 def compute_rsi(df, period=14):
     delta = df["Close"].diff()
@@ -27,80 +28,81 @@ def compute_rsi(df, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# Core scoring logic
-def analyze_stock(ticker):
-    stock = yf.Ticker(ticker)
-    df = stock.history(period="1y")
-
-    if df.empty or len(df) < 50:
-        return None
-
-    price = float(df["Close"].iloc[-1])
-
+# Backtest RSI strategy
+def backtest_rsi(df):
+    df = df.copy()
     df["RSI"] = compute_rsi(df)
-    rsi = float(df["RSI"].iloc[-1])
 
-    ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
+    position = 0
+    entry_price = 0
+    trades = []
+    capital = 10000
 
-    ma200 = None
-    if len(df) >= 200:
-        ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
+    for i in range(1, len(df)):
+        rsi = df["RSI"].iloc[i]
+        price = df["Close"].iloc[i]
 
-    score = 50
+        # BUY
+        if rsi < 30 and position == 0:
+            position = 1
+            entry_price = price
 
-    if rsi < 30:
-        score += 20
-    elif rsi > 70:
-        score -= 20
+        # SELL
+        elif rsi > 70 and position == 1:
+            profit = (price - entry_price) / entry_price
+            trades.append(profit)
+            capital *= (1 + profit)
+            position = 0
 
-    if price > ma50:
-        score += 10
-    if ma200 and price > ma200:
-        score += 10
-
-    score = max(0, min(100, int(score)))
+    total_return = (capital - 10000) / 10000 * 100
+    win_rate = (
+        len([t for t in trades if t > 0]) / len(trades) * 100
+        if trades else 0
+    )
 
     return {
-        "ticker": ticker.upper(),
-        "price": round(price, 2),
-        "score": score
+        "return_pct": round(total_return, 2),
+        "trades": len(trades),
+        "win_rate": round(win_rate, 2)
     }
 
 
-# Sector mapping (starter)
-SECTOR_MAP = {
-    "AAPL": ["MSFT", "GOOGL", "NVDA"],
-    "MSFT": ["AAPL", "GOOGL", "NVDA"],
-    "GOOGL": ["AAPL", "MSFT", "META"],
-    "TSLA": ["NIO", "RIVN", "F"],
-    "INFY.NS": ["TCS.NS", "WIPRO.NS", "HCLTECH.NS"]
-}
-
-
+# Analyze + Backtest
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
     try:
-        main = analyze_stock(ticker)
+        stock = yf.Ticker(ticker)
+        df = stock.history(period="1y")
 
-        if not main:
+        if df.empty or len(df) < 50:
             return {"error": "Not enough data"}
 
-        peers = SECTOR_MAP.get(ticker.upper(), [])
+        price = float(df["Close"].iloc[-1])
 
-        peer_results = []
-        for p in peers:
-            res = analyze_stock(p)
-            if res:
-                peer_results.append(res)
+        df["RSI"] = compute_rsi(df)
+        rsi = float(df["RSI"].iloc[-1])
 
-        # Sort best first
-        peer_results = sorted(peer_results, key=lambda x: x["score"], reverse=True)
+        ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
+
+        score = 50
+        if rsi < 30:
+            score += 20
+        elif rsi > 70:
+            score -= 20
+
+        if price > ma50:
+            score += 10
+
+        score = max(0, min(100, int(score)))
+
+        # BACKTEST
+        backtest = backtest_rsi(df)
 
         return {
-            "ticker": main["ticker"],
-            "price": main["price"],
-            "scores": {"total": main["score"]},
-            "peers": peer_results
+            "ticker": ticker.upper(),
+            "price": round(price, 2),
+            "scores": {"total": score},
+            "backtest": backtest
         }
 
     except Exception as e:
